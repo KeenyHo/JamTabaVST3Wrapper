@@ -79,6 +79,6 @@ if(WIN32)
             "${CMAKE_CURRENT_SOURCE_DIR}/source"
             "${vst3sdk_SOURCE_DIR}"
         )
-        target_link_libraries(vst3_smoke_test PRIVATE sdk_common pluginterfaces base)
+        target_link_libraries(vst3_smoke_test PRIVATE sdk_hosting sdk_common pluginterfaces base)
     endif()
 endif()
