@@ -1,0 +1,139 @@
+name: Build JamTaba VST3 + Official VST2 Bundle (Win64)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake (x64)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DJTW_BUILD_SMOKE_TEST=ON
+
+      - name: Build VST3 Wrapper and Smoke Test (Release)
+        run: cmake --build build --config Release --target JamTabaVST3Wrapper vst3_smoke_test -j
+
+      - name: Download official JamTaba v2.1.16 64-bit installer and extract JamtabaVST2.dll
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist_tmp | Out-Null
+          $installerUrl = "https://github.com/elieserdejesus/JamTaba/releases/download/v2.1.16/Jamtaba.2.64.bits.installer.exe"
+          Invoke-WebRequest -Uri $installerUrl -OutFile "dist_tmp\Jamtaba.2.64.bits.installer.exe"
+
+          # Try innoextract first (clean extraction without running installer)
+          $vst2Path = $null
+          try {
+            choco install -y innoextract --no-progress | Out-Null
+            innoextract -d dist_tmp\extracted dist_tmp\Jamtaba.2.64.bits.installer.exe
+            $found = Get-ChildItem -Path dist_tmp\extracted -Recurse -Filter "JamtabaVST2.dll" | Select-Object -First 1
+            if ($found) { $vst2Path = $found.FullName }
+          } catch {
+            Write-Warning "innoextract failed, falling back to silent Inno Setup extraction..."
+          }
+
+          if (-not $vst2Path) {
+            Start-Process -FilePath "dist_tmp\Jamtaba.2.64.bits.installer.exe" -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-" -Wait
+            $searchRoots = @("C:\Program Files\Steinberg\VSTPlugins", "C:\Program Files\VSTPlugins", "C:\Program Files\JamTaba 2")
+            foreach ($root in $searchRoots) {
+              if (Test-Path $root) {
+                $found = Get-ChildItem -Path $root -Recurse -Filter "JamtabaVST2.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($found) { $vst2Path = $found.FullName; break }
+              }
+            }
+          }
+
+          if (-not $vst2Path) {
+            throw "Failed to extract JamtabaVST2.dll from official JamTaba v2.1.16 installer"
+          }
+          Write-Host "Extracted official 64-bit VST2 DLL: $vst2Path"
+          Copy-Item -Force $vst2Path "dist_tmp\JamtabaVST2.dll"
+
+      - name: Assemble ready-to-use VST2 + VST3 package and run Windows x64 smoke test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release_pkg\VST2, release_pkg\VST3 | Out-Null
+
+          # Copy standalone official 64-bit VST2
+          Copy-Item -Force "dist_tmp\JamtabaVST2.dll" "release_pkg\VST2\JamtabaVST2.dll"
+
+          # Locate built VST3 bundle dynamically
+          $builtBundle = Get-ChildItem -Path build -Recurse -Directory -Filter "JamTabaVST3Wrapper.vst3" | Select-Object -First 1
+          if (-not $builtBundle) {
+            throw "Could not locate built JamTabaVST3Wrapper.vst3 bundle under build/"
+          }
+          Write-Host "Built VST3 bundle: $($builtBundle.FullName)"
+
+          # Copy built VST3 bundle and embed JamtabaVST2.dll inside Contents\x86_64-win\
+          Copy-Item -Recurse -Force $builtBundle.FullName "release_pkg\VST3\JamTabaVST3Wrapper.vst3"
+          Copy-Item -Force "dist_tmp\JamtabaVST2.dll" "release_pkg\VST3\JamTabaVST3Wrapper.vst3\Contents\x86_64-win\JamtabaVST2.dll"
+
+          # Also install VC++ 2013 x64 runtime on the runner if bundled inside the JamTaba installer so smoke test can load JamtabaVST2.dll
+          $vcredist = Get-ChildItem -Path dist_tmp -Recurse -Filter "vcredist_x64.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($vcredist) {
+            Write-Host "Installing bundled $($vcredist.FullName) on CI runner for smoke test..."
+            Start-Process -FilePath $vcredist.FullName -ArgumentList "/install /quiet /norestart" -Wait
+          }
+
+          # Write quick installation guide into the release package
+          @(
+            "JamTaba 2 (v2.1.16) 64-bit Windows Plugin Bundle (Official VST2 + VST3 Wrapper)",
+            "==============================================================================",
+            "",
+            "[1] Install VST3 (Recommended - Plug & Play)",
+            "JamTabaVST3Wrapper.vst3 already bundles the official 64-bit JamtabaVST2.dll.",
+            "Copy the entire folder:",
+            "  VST3\JamTabaVST3Wrapper.vst3",
+            "into:",
+            "  C:\Program Files\Common Files\VST3\",
+            "Then restart your DAW and load: JamTaba 2 (VST3 Wrapper) [Fx | Network].",
+            "",
+            "[2] Install Official 64-bit VST2 (Optional)",
+            "Copy:",
+            "  VST2\JamtabaVST2.dll",
+            "into your DAW 64-bit VST2 folder (e.g. C:\Program Files\VSTPlugins\).",
+            "",
+            "[3] Runtime Note",
+            "Official JamtabaVST2.dll requires Microsoft Visual C++ 2013 Redistributable (x64)."
+          ) | Set-Content -Encoding UTF8 "release_pkg\README-INSTALL.txt"
+
+          # Run real Windows x64 smoke test against the bundled VST3 + real JamtabaVST2.dll!
+          $smokeExe = Get-ChildItem -Path build -Recurse -Filter "vst3_smoke_test.exe" | Select-Object -First 1
+          $vst3Bin = "release_pkg\VST3\JamTabaVST3Wrapper.vst3\Contents\x86_64-win\JamTabaVST3Wrapper.vst3"
+          Write-Host "Running $($smokeExe.FullName) against $vst3Bin ..."
+          & $smokeExe.FullName $vst3Bin
+          if ($LASTEXITCODE -ne 0) {
+            throw "vst3_smoke_test failed with exit code $LASTEXITCODE"
+          }
+
+          # Create final distributable ZIP
+          Compress-Archive -Path "release_pkg\*" -DestinationPath "JamTaba2-Win64-VST2-and-VST3.zip" -Force
+          Get-Item "JamTaba2-Win64-VST2-and-VST3.zip" | Format-List Name, Length
+
+      - name: Upload final VST2 + VST3 ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JamTaba2-Win64-VST2-and-VST3
+          path: JamTaba2-Win64-VST2-and-VST3.zip
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v1.0.0"
+          if (gh release view $tag 2>$null) {
+            gh release upload $tag "JamTaba2-Win64-VST2-and-VST3.zip" --clobber
+          } else {
+            gh release create $tag "JamTaba2-Win64-VST2-and-VST3.zip" `
+              --title "JamTaba 2 Win64 VST2 & VST3 Wrapper (v1.0.0)" `
+              --notes "64-bit Windows VST3 wrapper for JamTaba v2.1.16, bundled with official 64-bit JamtabaVST2.dll."
+          }
+        shell: pwsh
