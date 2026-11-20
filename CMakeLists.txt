@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(JamTabaVST3Wrapper
-    VERSION 1.0.0
+    VERSION 1.0.0.0
     DESCRIPTION "64-bit Windows VST3 wrapper for JamtabaVST2.dll"
     LANGUAGES CXX C
 )
